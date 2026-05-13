@@ -48,9 +48,10 @@ class DispensaDB:
     # Aggiunge un prodotto alla tabella items
     def add_item(self,item: dict):
         connection = self.get_connection()
-
         quantity = self.clean_quantity(item.get("quantity"))
-
+        price = self.clean_price(item.get("price"))
+        quantity = self.clean_quantity(item.get("quantity"))
+        initial_quantity = quantity
         unit = item.get("unit")
         if quantity is None:
             quantity = 1
@@ -59,19 +60,23 @@ class DispensaDB:
             with connection.cursor() as cursor:
                 sql = """
                     INSERT INTO items
-                    (name, quantity, unit, location, expiry_date, notes)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    (name, quantity, initial_quantity, unit, location, expiry_date, notes, price)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """
-
+                
+                
                 cursor.execute(
                     sql,
                     (
                         item.get("name"),
                         quantity,
+                        initial_quantity,
                         unit,
                         item.get("location"),
                         item.get("expiry_date"),
                         item.get("notes"),
+                        price,
+                        
                     ),
                 )
 
@@ -90,6 +95,7 @@ class DispensaDB:
                         SELECT id, name, quantity, unit, location, expiry_date, notes
                         FROM items
                         WHERE location = %s
+                        AND (quantity IS NULL OR quantity > 0)
                         ORDER BY created_at DESC
                     """
                     cursor.execute(sql, (location,))
@@ -97,6 +103,7 @@ class DispensaDB:
                     sql = """
                         SELECT id, name, quantity, unit, location, expiry_date, notes
                         FROM items
+                        WHERE quantity IS NULL OR quantity > 0
                         ORDER BY created_at DESC
                     """
                     cursor.execute(sql)
@@ -121,7 +128,7 @@ class DispensaDB:
 
             qty_text = ""
             if quantity is not None:
-                qty_text = f" - {quantity:g} {unit}".strip()
+                qty_text = f" - {quantity:g} {unit}"
 
             expiry_text = ""
             if expiry:
@@ -226,3 +233,216 @@ class DispensaDB:
 
         finally:
             conn.close()
+
+    def clean_price(self, value):
+        if value is None:
+            return None
+
+        if isinstance(value, Decimal):
+            return value
+
+        try:
+            if isinstance(value, str):
+                value = value.replace(",", ".").strip()
+
+            return Decimal(str(value))
+        except:
+            return None
+
+    def get_expiring_items(self, days=3):
+        try:
+            days = int(days)
+        except:
+            days = 3
+
+        connection = self.get_connection()
+
+        try:
+            with connection.cursor() as cursor:
+                sql = """
+                SELECT *
+                FROM items
+                WHERE expiry_date IS NOT NULL
+                AND expiry_date <= DATE_ADD(CURDATE(), INTERVAL %s DAY)
+                AND expiry_date >= CURDATE()
+                ORDER BY expiry_date ASC
+                """
+
+                cursor.execute(sql, (days,))
+                return cursor.fetchall()
+
+        finally:
+            connection.close()
+            
+    def get_pantry_value(self):
+        connection = self.get_connection()
+
+        try:
+            with connection.cursor() as cursor:
+                sql = """
+                SELECT
+                    SUM(
+                        CASE
+                            WHEN price IS NOT NULL
+                            AND quantity IS NOT NULL
+                            AND initial_quantity IS NOT NULL
+                            AND initial_quantity > 0
+                            THEN price * (quantity / initial_quantity)
+                            ELSE 0
+                        END
+                    ) AS total_value
+                FROM items
+                WHERE quantity IS NULL OR quantity > 0
+                """
+
+                cursor.execute(sql)
+                row = cursor.fetchone()
+                return row.get("total_value") or 0
+
+        finally:
+            connection.close()
+            
+    def discard_item(self, item, amount_fraction=None):
+        name = item.get("name")
+
+        if not name:
+            return "Non ho capito quale prodotto hai buttato."
+
+        quantity_value = self.clean_quantity(item.get("quantity"))
+
+        def to_decimal(value):
+            if value is None:
+                return None
+            if isinstance(value, Decimal):
+                return value
+            return Decimal(str(value))
+
+        connection = self.get_connection()
+
+        try:
+            with connection.cursor() as cursor:
+                sql = """
+                SELECT *
+                FROM items
+                WHERE name LIKE %s
+                AND (quantity IS NULL OR quantity > 0)
+                ORDER BY expiry_date IS NULL, expiry_date ASC, id ASC
+                LIMIT 1
+                """
+                cursor.execute(sql, (f"%{name}%",))
+                row = cursor.fetchone()
+
+                if not row:
+                    return f"Non ho trovato {name} nella dispensa."
+
+                item_id = row["id"]
+                db_name = row["name"]
+                unit = row.get("unit")
+                current_quantity = to_decimal(row.get("quantity"))
+                initial_quantity = to_decimal(row.get("initial_quantity"))
+                price = to_decimal(row.get("price"))
+
+                if amount_fraction is None:
+                    amount_fraction = item.get("amount_fraction")
+
+                if current_quantity is None:
+                    wasted_quantity = None
+                    new_quantity = Decimal("0")
+                else:
+                    if amount_fraction is not None:
+                        wasted_quantity = current_quantity * Decimal(str(amount_fraction))
+                    elif quantity_value is not None:
+                        wasted_quantity = to_decimal(quantity_value)
+                    else:
+                        wasted_quantity = current_quantity
+
+                    if wasted_quantity > current_quantity:
+                        wasted_quantity = current_quantity
+
+                    new_quantity = current_quantity - wasted_quantity
+
+                    if new_quantity < Decimal("0.0001"):
+                        new_quantity = Decimal("0")
+
+                estimated_value = None
+
+                if (
+                    price is not None
+                    and wasted_quantity is not None
+                    and initial_quantity is not None
+                    and initial_quantity > 0
+                ):
+                    estimated_value = price * (wasted_quantity / initial_quantity)
+
+                sql = """
+                INSERT INTO waste_log
+                (item_id, name, quantity, unit, estimated_value, notes)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """
+                cursor.execute(sql, (
+                    item_id,
+                    db_name,
+                    wasted_quantity,
+                    unit,
+                    estimated_value,
+                    item.get("notes")
+                ))
+
+                sql = """
+                UPDATE items
+                SET quantity = %s
+                WHERE id = %s
+                """
+                cursor.execute(sql, (new_quantity, item_id))
+
+                connection.commit()
+
+                value_text = ""
+                if estimated_value is not None:
+                    value_text = f" Valore buttato circa €{estimated_value:.2f}."
+
+                return f"Ho registrato {db_name} come buttato.{value_text}"
+
+        finally:
+            connection.close()
+
+            
+    def list_waste_log(self):
+        connection = self.get_connection()
+
+        try:
+            with connection.cursor() as cursor:
+                sql = """
+                SELECT name, quantity, unit, estimated_value, created_at
+                FROM waste_log
+                ORDER BY created_at DESC
+                LIMIT 20
+                """
+                cursor.execute(sql)
+                rows = cursor.fetchall()
+
+                if not rows:
+                    return "Non ho ancora registrato prodotti buttati."
+
+                lines = ["🗑 Prodotti buttati:"]
+
+                for row in rows:
+                    name = row["name"]
+                    quantity = row.get("quantity")
+                    unit = row.get("unit") or ""
+                    value = row.get("estimated_value")
+
+                    text = f"• {name}"
+
+                    if quantity is not None:
+                        text += f" - {quantity:g} {unit}"
+
+                    if value is not None:
+                        text += f" - circa €{value:.2f}"
+
+                    lines.append(text)
+
+                return "\n".join(lines)
+
+        finally:
+            connection.close()
