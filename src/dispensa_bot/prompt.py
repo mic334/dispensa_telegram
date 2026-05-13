@@ -206,14 +206,16 @@ Esempi:
 
 #prom for LLM vision
 RECEIPT_VISION_PROMPT = """
-Leggi questa immagine come se fosse uno scontrino.
+Leggi questa immagine come uno scontrino italiano.
 
-Estrai solo prodotti alimentari o da dispensa.
-Ignora totale, subtotale, IVA, pagamento, resto, carte, sconti generici.
+Estrai solo le righe prodotto.
+Ignora intestazione negozio, indirizzo, partita IVA, totale, subtotale, pagamento, resto, punti, fidelity, IVA e sconti.
 
-Rispondi SOLO con JSON valido, senza testo fuori dal JSON.
+Rispondi SOLO con JSON valido.
+Non scrivere testo fuori dal JSON.
+Non usare markdown.
 
-Formato:
+Formato obbligatorio:
 {
   "intent": "add_items",
   "items": [
@@ -227,12 +229,15 @@ Formato:
 }
 
 Regole:
-- Se capisci una quantità tipo 2x, usa quantity 2.
-- Se capisci litro, kg, grammi, usa unit corretta.
-- Se non capisci l'unità, usa "pezzo".
-- Se non capisci la quantità, usa 1.
-- Se non capisci il prezzo, usa null.
-- I prezzi devono essere numeri con il punto, esempio 1.29.
-- Ignora sempre righe che contengono: sconto, sconti, subtotale, totale, iva, pagamento, carta, bancomat, contanti, resto, punti, fidelity.
-- Non inserire mai gli sconti come prodotti.
+- Inserisci solo prodotti reali acquistati.
+- Non inserire il nome del supermercato.
+- Non inserire indirizzi o dati fiscali.
+- Non inserire righe di totale.
+- Non inserire righe di sconto.
+- Non usare mai valori IVA come prezzo.
+- Valori tipo 4,00%, 10,00%, 22,00% sono IVA, non prezzi.
+- Se non sei sicuro del prezzo, usa price = null.
+- Se non capisci la quantità, usa quantity = 1.
+- Se non capisci l'unità, usa unit = "pezzo".
+- I prezzi devono essere numeri con il punto, esempio 1.99.
 """

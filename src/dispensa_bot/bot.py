@@ -1,5 +1,6 @@
 import json
 import os
+import traceback
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 
@@ -36,6 +37,56 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def clean_receipt_items(items: list[dict]) -> list[dict]:
+    blocked_words = [
+        "grazie",
+        "arrivederci",
+        "subtotale",
+        "totale",
+        "totale complessivo",
+        "iva",
+        "prezzo",
+        "descrizione",
+        "pagamento",
+        "carta",
+        "bancomat",
+        "contanti",
+        "resto",
+        "punti",
+        "fidelity",
+        "via ",
+        "p.i.",
+        "partita iva",
+        "codice fiscale",
+        "pam panorama",
+        "s.p.a",
+    ]
+
+    cleaned = []
+
+    for item in items:
+        name = str(item.get("name", "")).strip()
+        raw_line = str(item.get("raw_line", "")).strip()
+        confidence = item.get("confidence")
+
+        text = f"{name} {raw_line}".lower()
+
+        if not name:
+            continue
+
+        if any(word in text for word in blocked_words):
+            continue
+
+        try:
+            if confidence is not None and float(confidence) < 0.4:
+                continue
+        except (ValueError, TypeError):
+            continue
+
+        cleaned.append(item)
+
+    return cleaned
+
 def apply_shelf_life(item, message_date):
     shelf_life_days = item.get("shelf_life_days")
 
@@ -62,6 +113,59 @@ def format_quantity(quantity):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_text = update.message.text
     normalized_text = user_text.strip().lower()
+    
+    if normalized_text in ["conferma", "annulla"]:
+        chat_id = update.effective_chat.id
+        receipt = db.get_last_draft_receipt(chat_id)
+
+        if not receipt:
+            await update.message.reply_text(
+                "Non ho trovato nessuno scontrino da confermare o annullare."
+            )
+            return
+
+        receipt_id = receipt["id"]
+        label = receipt["label"]
+
+        if normalized_text == "annulla":
+            db.cancel_receipt(receipt_id)
+            await update.message.reply_text(
+                f'Ho annullato "{label}".'
+            )
+            return
+
+        if normalized_text == "conferma":
+            receipt_lines = db.get_receipt_lines(receipt_id)
+
+            if not receipt_lines:
+                await update.message.reply_text(
+                    f'Lo scontrino "{label}" non contiene prodotti.'
+                )
+                return
+
+            added_count = 0
+
+            for row in receipt_lines:
+                item = {
+                    "name": row.get("name") or row.get("raw_name"),
+                    "quantity": row.get("quantity") or 1,
+                    "unit": row.get("unit") or "pezzo",
+                    "price": row.get("line_price"),
+                    "location": None,
+                    "expiry_date": None,
+                    "notes": f'Da {label}',
+                }
+
+                db.add_item(item)
+                added_count += 1
+
+            db.confirm_receipt(receipt_id)
+
+            await update.message.reply_text(
+                f'Ho confermato "{label}" e aggiunto {added_count} prodotti alla dispensa ✅'
+            )
+            return
+    
 
     if normalized_text == "pulisci tutto":
         deleted_count = db.delete_all_items()
@@ -204,6 +308,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         result = await interpret_receipt_image(image_path)
         items = result.get("items", [])
+        items = clean_receipt_items(items)
+        if not items:
+            await update.message.reply_text(
+                "Non sono riuscito a leggere lo scontrino in modo affidabile. "
+                "Ho trovato righe ambigue o prezzi non sicuri, quindi non aggiungo nulla."
+            )
+            return
 
         blocked_words = [
             "sconto",
@@ -233,13 +344,37 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
 
-        lines = ["Ho letto dallo scontrino:"]
+        
+        chat_id = update.effective_chat.id
 
+        total_price = 0.0
+        for item in items:
+            price = item.get("price")
+            if price is not None:
+                try:
+                    total_price += float(str(price).replace(",", "."))
+                except (ValueError, TypeError):
+                    pass
+
+        receipt_id, label = db.create_receipt(
+            chat_id=chat_id,
+            total_price=total_price,
+        )
+
+        for item in items:
+            db.add_receipt_line(receipt_id, item)
+
+        lines = [f'Ho letto lo scontrino "{label}":']
+
+        for_number = 1
+        
         for item in items:
             name = item.get("name", "prodotto")
             quantity = item.get("quantity") or 1
             unit = item.get("unit") or "pezzo"
             price = item.get("price")
+            #raw_line = item.get("raw_line")
+            confidence = item.get("confidence")
 
             line = f"• {name} - {format_quantity(quantity)} {unit}"
 
@@ -249,16 +384,26 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 except (ValueError, TypeError):
                     line += f" - €{price}"
 
+
             lines.append(line)
+            for_number += 1
+
+        lines.append("")
+        lines.append(f"Totale letto: €{total_price:.2f}")
+        lines.append("")
+        lines.append("Vuoi aggiungere questo scontrino alla dispensa?")
+        lines.append('Rispondi "conferma" oppure "annulla".')
 
         await update.message.reply_text("\n".join(lines))
 
     except Exception as error:
+        print("ERRORE SCONTRINO:")
+        print(traceback.format_exc())
+
         await update.message.reply_text(
             "Errore mentre leggevo lo scontrino.\n\n"
-            f"Dettaglio: {error}"
+            f"Dettaglio: {repr(error)}"
         )
-
 
 # Funzione principale che avvia il bot Telegram
 def run_bot() -> None:

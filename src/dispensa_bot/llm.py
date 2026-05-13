@@ -72,10 +72,9 @@ async def interpret_message(user_text: str) -> dict:
         
         
 async def interpret_receipt_image(image_path: str) -> dict:
+    model = os.getenv("OLLAMA_MODEL_VISION", OLLAMA_MODEL_VISION)
+    url = os.getenv("OLLAMA_URL", OLLAMA_URL)
 
-    model = os.getenv("OLLAMA_MODEL_VISION")
-    url = os.getenv("OLLAMA_URL")
-    
     with open(image_path, "rb") as image_file:
         image_base64 = base64.b64encode(image_file.read()).decode("utf-8")
 
@@ -83,6 +82,10 @@ async def interpret_receipt_image(image_path: str) -> dict:
         "model": model,
         "format": "json",
         "stream": False,
+        "optins" : { 
+            "temperature": 0,
+            "num_predict": 800,
+        },
         "messages": [
             {
                 "role": "user",
@@ -92,7 +95,14 @@ async def interpret_receipt_image(image_path: str) -> dict:
         ],
     }
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    timeout = httpx.Timeout(
+    300.0,
+    connect=10.0,
+    read=300.0,
+    write=60.0,
+)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url, json=payload)
         response.raise_for_status()
 

@@ -249,6 +249,89 @@ class DispensaDB:
         except:
             return None
 
+            
+    
+    
+    
+    
+    def get_next_receipt_label(self, chat_id):
+        connection = self.get_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM receipts
+                    WHERE chat_id = %s
+                    """,
+                    (chat_id,),
+                )
+                row = cursor.fetchone()
+                number = int(row["count"]) + 1
+                return f"scontrino {number}"
+        finally:
+            connection.close()
+
+
+    def create_receipt(self, chat_id, label=None, total_price=0):
+        if label is None:
+            label = self.get_next_receipt_label(chat_id)
+
+        connection = self.get_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO receipts (chat_id, label, total_price, status)
+                    VALUES (%s, %s, %s, 'draft')
+                    """,
+                    (chat_id, label, total_price),
+                )
+                receipt_id = cursor.lastrowid
+                connection.commit()
+                return receipt_id, label
+        finally:
+            connection.close()
+
+
+    def add_receipt_line(self, receipt_id, item):
+        quantity = self.clean_quantity(item.get("quantity")) or 1
+        unit = item.get("unit") or "pezzo"
+        price = self.clean_price(item.get("price"))
+
+        unit_price = None
+        if price is not None and quantity:
+            unit_price = price / Decimal(str(quantity))
+
+        raw_name = item.get("raw_name") or item.get("name") or "prodotto"
+        name = item.get("name") or raw_name
+
+        connection = self.get_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO receipt_lines
+                    (receipt_id, raw_name, name, quantity, unit, line_price, unit_price, needs_review)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        receipt_id,
+                        raw_name,
+                        name,
+                        quantity,
+                        unit,
+                        price,
+                        unit_price,
+                        False,
+                    ),
+                )
+                connection.commit()
+        finally:
+            connection.close()
+    
+            
+
     def get_expiring_items(self, days=3):
         try:
             days = int(days)
@@ -444,5 +527,92 @@ class DispensaDB:
 
                 return "\n".join(lines)
 
+        finally:
+            connection.close()
+            
+    def get_last_draft_receipt(self, chat_id):
+        connection = self.get_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM receipts
+                    WHERE chat_id = %s
+                    AND status = 'draft'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (chat_id,),
+                )
+                return cursor.fetchone()
+        finally:
+            connection.close()
+
+
+    def get_receipt_lines(self, receipt_id):
+        connection = self.get_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM receipt_lines
+                    WHERE receipt_id = %s
+                    ORDER BY id ASC
+                    """,
+                    (receipt_id,),
+                )
+                return cursor.fetchall()
+        finally:
+            connection.close()
+
+
+    def cancel_receipt(self, receipt_id):
+        connection = self.get_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE receipts
+                    SET status = 'cancelled',
+                        cancelled_at = NOW()
+                    WHERE id = %s
+                    AND status = 'draft'
+                    """,
+                    (receipt_id,),
+                )
+                connection.commit()
+                return cursor.rowcount
+        finally:
+            connection.close()
+
+
+    def confirm_receipt(self, receipt_id):
+        connection = self.get_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE receipt_lines
+                    SET added_to_pantry = TRUE
+                    WHERE receipt_id = %s
+                    """,
+                    (receipt_id,),
+                )
+
+                cursor.execute(
+                    """
+                    UPDATE receipts
+                    SET status = 'confirmed',
+                        confirmed_at = NOW()
+                    WHERE id = %s
+                    AND status = 'draft'
+                    """,
+                    (receipt_id,),
+                )
+
+                connection.commit()
+                return cursor.rowcount
         finally:
             connection.close()
