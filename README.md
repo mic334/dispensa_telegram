@@ -808,12 +808,7 @@ This project combines Python backend development, workflow automation, local LLM
 
 ---
 
+
 ## License
 
-No license has been specified yet.
-
-If this project is intended to be open source, consider adding a license such as:
-
-- MIT
-- Apache-2.0
-- GPL-3.0
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
