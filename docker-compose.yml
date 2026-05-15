@@ -1,0 +1,37 @@
+services:
+  bot:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      - mariadb
+      - ollama
+    volumes:
+      - ./tmp:/app/tmp
+    restart: unless-stopped
+
+  mariadb:
+    image: mariadb:11
+    environment:
+      MARIADB_DATABASE: dispensa_db
+      MARIADB_USER: dispensa
+      MARIADB_PASSWORD: dispensa_password
+      MARIADB_ROOT_PASSWORD: root_password
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - .database/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    ports:
+      - "3307:3306"
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+
+volumes:
+  mariadb_data:
+  ollama_data:
